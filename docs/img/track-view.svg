@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270">
+  <!-- WiFi Signal Hunter 追踪页 UI 模拟图（240x135 2x） -->
+  <rect width="480" height="270" fill="#000"/>
+  <rect x="2" y="2" width="476" height="266" fill="none" stroke="#222" stroke-width="4"/>
+
+  <!-- 目标信息 -->
+  <text x="10" y="18" font-family="monospace" font-size="14" fill="#00FFFF">Home-5G</text>
+  <text x="10" y="34" font-family="monospace" font-size="12" fill="#888">64:09:80:A1:2B:3C</text>
+  <text x="470" y="34" font-family="monospace" font-size="12" fill="#888" text-anchor="end">ch36</text>
+
+  <!-- 大号实时读数 -->
+  <text x="10" y="66" font-family="monospace" font-size="30" font-weight="bold" fill="#00FF00">-47 dBm</text>
+  <text x="310" y="62" font-family="monospace" font-size="20" fill="#D3D3D3">Good</text>
+
+  <!-- 信号条 76% -->
+  <rect x="8" y="116" width="464" height="20" fill="#555"/>
+  <rect x="8" y="116" width="353" height="20" fill="#00FF00"/>
+
+  <!-- 历史曲线（越靠右越新，末段绿色） -->
+  <polyline points="8,214 28,210 48,212 68,204 88,208 108,198 128,202 148,192 168,196 188,186 208,190 228,180 248,184 268,176 288,180 308,172 328,178 348,170 368,174 388,166 408,172 428,164 448,158 472,150"
+            fill="none" stroke="#00FFFF" stroke-width="2"/>
+  <polyline points="448,158 472,150" fill="none" stroke="#00FF00" stroke-width="4"/>
+
+  <!-- 底轴 -->
+  <line x1="8" y1="240" x2="472" y2="240" stroke="#555" stroke-width="2"/>
+  <text x="8"  y="258" font-family="monospace" font-size="12" fill="#888">-100</text>
+  <text x="472" y="258" font-family="monospace" font-size="12" fill="#888" text-anchor="end">-30</text>
+  <text x="240" y="258" font-family="monospace" font-size="12" fill="#888" text-anchor="middle">A:scan B:back</text>
+</svg>

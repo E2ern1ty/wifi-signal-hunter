@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270">
+  <!-- WiFi Signal Hunter 列表页 UI 模拟图（240x135 2x） -->
+  <rect width="480" height="270" fill="#000"/>
+  <rect x="2" y="2" width="476" height="266" fill="none" stroke="#222" stroke-width="4"/>
+
+  <!-- 标题栏 -->
+  <rect x="4" y="4" width="472" height="48" fill="#000080"/>
+  <text x="10" y="22" font-family="monospace" font-size="16" fill="#fff">WiFi Signal Hunter</text>
+  <text x="10" y="42" font-family="monospace" font-size="13" fill="#888">A-long:hide &lt;hid&gt;</text>
+  <text x="470" y="42" font-family="monospace" font-size="13" fill="#0f0" text-anchor="end">BAT 87%</text>
+
+  <!-- 行 1：选中 -->
+  <rect x="4" y="52" width="472" height="30" fill="#555"/>
+  <rect x="12" y="76" width="6" height="8" fill="#00FF00"/>
+  <rect x="20" y="72" width="6" height="12" fill="#00FF00"/>
+  <rect x="28" y="68" width="6" height="16" fill="#00FF00"/>
+  <rect x="36" y="64" width="6" height="20" fill="#00FF00"/>
+  <rect x="44" y="60" width="6" height="24" fill="#00FF00"/>
+  <text x="58" y="72" font-family="monospace" font-size="14" fill="#fff">Home-5G</text>
+  <text x="306" y="72" font-family="monospace" font-size="14" fill="#fff">ch36</text>
+  <text x="386" y="72" font-family="monospace" font-size="14" fill="#00FF00"> -42</text>
+
+  <!-- 行 2 -->
+  <rect x="12" y="104" width="6" height="8" fill="#00FF00"/>
+  <rect x="20" y="100" width="6" height="12" fill="#00FF00"/>
+  <rect x="28" y="96" width="6" height="16" fill="#00FF00"/>
+  <rect x="36" y="92" width="6" height="20" fill="#00FF00"/>
+  <rect x="44" y="88" width="6" height="24" fill="#555"/>
+  <text x="58" y="100" font-family="monospace" font-size="14" fill="#D3D3D3">CMCC-a3kp</text>
+  <text x="306" y="100" font-family="monospace" font-size="14" fill="#D3D3D3">ch6 </text>
+  <text x="386" y="100" font-family="monospace" font-size="14" fill="#FFFF00"> -58</text>
+
+  <!-- 行 3 -->
+  <rect x="12" y="132" width="6" height="8" fill="#FFFF00"/>
+  <rect x="20" y="128" width="6" height="12" fill="#FFFF00"/>
+  <rect x="28" y="124" width="6" height="16" fill="#FFFF00"/>
+  <rect x="36" y="120" width="6" height="20" fill="#FFFF00"/>
+  <rect x="44" y="116" width="6" height="24" fill="#555"/>
+  <text x="58" y="128" font-family="monospace" font-size="14" fill="#D3D3D3">TP-LINK_5304</text>
+  <text x="306" y="128" font-family="monospace" font-size="14" fill="#D3D3D3">ch1 </text>
+  <text x="386" y="128" font-family="monospace" font-size="14" fill="#FFFF00"> -63</text>
+
+  <!-- 行 4 -->
+  <rect x="12" y="160" width="6" height="8" fill="#FFA500"/>
+  <rect x="20" y="156" width="6" height="12" fill="#FFA500"/>
+  <rect x="28" y="152" width="6" height="16" fill="#FFA500"/>
+  <rect x="36" y="148" width="6" height="20" fill="#555"/>
+  <rect x="44" y="144" width="6" height="24" fill="#555"/>
+  <text x="58" y="156" font-family="monospace" font-size="14" fill="#D3D3D3">xiaomi-router</text>
+  <text x="306" y="156" font-family="monospace" font-size="14" fill="#D3D3D3">ch11</text>
+  <text x="386" y="156" font-family="monospace" font-size="14" fill="#FFA500"> -71</text>
+
+  <!-- 行 5：隐藏网络 -->
+  <rect x="12" y="188" width="6" height="8" fill="#FFA500"/>
+  <rect x="20" y="184" width="6" height="12" fill="#FFA500"/>
+  <rect x="28" y="180" width="6" height="16" fill="#FFA500"/>
+  <rect x="36" y="176" width="6" height="20" fill="#555"/>
+  <rect x="44" y="172" width="6" height="24" fill="#555"/>
+  <text x="58" y="184" font-family="monospace" font-size="14" fill="#D3D3D3">&lt;hid 2B3C&gt;</text>
+  <text x="306" y="184" font-family="monospace" font-size="14" fill="#D3D3D3">ch13</text>
+  <text x="386" y="184" font-family="monospace" font-size="14" fill="#FFA500"> -78</text>
+
+  <!-- 行 6 -->
+  <rect x="12" y="216" width="6" height="8" fill="#FF0000"/>
+  <rect x="20" y="212" width="6" height="12" fill="#FF0000"/>
+  <rect x="28" y="208" width="6" height="16" fill="#555"/>
+  <rect x="36" y="204" width="6" height="20" fill="#555"/>
+  <rect x="44" y="200" width="6" height="24" fill="#555"/>
+  <text x="58" y="212" font-family="monospace" font-size="14" fill="#D3D3D3">Office-Guest</text>
+  <text x="306" y="212" font-family="monospace" font-size="14" fill="#D3D3D3">ch149</text>
+  <text x="386" y="212" font-family="monospace" font-size="14" fill="#FF0000"> -83</text>
+
+  <!-- 行 7 -->
+  <rect x="12" y="244" width="6" height="8" fill="#FF0000"/>
+  <rect x="20" y="240" width="6" height="12" fill="#555"/>
+  <rect x="28" y="236" width="6" height="16" fill="#555"/>
+  <rect x="36" y="232" width="6" height="20" fill="#555"/>
+  <rect x="44" y="228" width="6" height="24" fill="#555"/>
+  <text x="58" y="240" font-family="monospace" font-size="14" fill="#D3D3D3">CMCC-xfx1</text>
+  <text x="306" y="240" font-family="monospace" font-size="14" fill="#D3D3D3">ch3 </text>
+  <text x="386" y="240" font-family="monospace" font-size="14" fill="#FF0000"> -89</text>
+</svg>
