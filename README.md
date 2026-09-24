@@ -49,6 +49,21 @@ esptool --chip esp32s3 --port /dev/cu.usbmodem1101 --baud 921600 \
 烧完**拔插一次 USB** 即开机运行（ESP32-S3 的 USB 下载模式需断电退出）。
 M5StickS3 出厂固件可用本仓库 `restore_stock.sh` 还原（需自备份镜像）。
 
+## translator — 手持翻译器
+
+**按住 A 说话（中文），松开即得英文/日文译文并朗读。**
+
+```
+按住 A ─► 讯飞 iat 流式听写（音频边录边推流，文字边说边上屏）
+松开   ─► 硅基流动 Qwen2.5-7B 翻译(~0.4s) ─► CosyVoice2 合成朗读(~0.8s)
+```
+
+- 目标语言 B 键切换 英/日（NVS 记忆）；重力横屏翻转；TTS 语速 0.8、音量满格
+- iat 失败自动回退整段 HTTPS 识别（Qwen3-ASR）；TTS 失败降级为纯文字
+- 配置：`cp translator/secrets.example.h translator/secrets.h`，填 WiFi +
+  硅基流动 key + 讯飞三件套（iat），编译命令同下（目录换 translator）
+- 排障记录见 `translator/test_api.py` 与 `translator/test_xfyun.py`
+
 ## 从源码构建
 
 ```bash
