@@ -547,6 +547,7 @@ static bool doTtsFetch() {
   req["input"] = dstText;
   req["voice"] = "FunAudioLLM/CosyVoice2-0.5B:alex";
   req["response_format"] = "wav";
+  req["speed"] = 0.8; // 语速放慢
   String body;
   serializeJson(req, body);
   if (!httpsPostBinary(TTS_PATH, body, "wav")) { errMsg = "TTS failed"; return false; }
@@ -569,7 +570,7 @@ static void playTts() {
   if (playPcm && playSamples) {
     M5.Mic.end();
     M5.Speaker.begin();
-    M5.Speaker.setVolume(220);
+    M5.Speaker.setVolume(255);
     M5.Speaker.playRaw(playPcm, playSamples, playRate, false, 1, 0);
     Serial.printf("[play] %d samples @%d\r\n", (int)playSamples, (int)playRate);
   }
@@ -763,7 +764,7 @@ void loop() {
     if (M5.BtnA.wasClicked() && recSamples > MIN_SAMPLES) {
       M5.Mic.end();
       M5.Speaker.begin();
-      M5.Speaker.setVolume(220);
+      M5.Speaker.setVolume(255);
       M5.Speaker.playRaw(recPcm, recSamples, SAMPLE_RATE, false, 1, 0);
       while (M5.Speaker.isPlaying()) { M5.update(); M5.delay(20); }
       M5.Speaker.end();
@@ -851,7 +852,7 @@ void loop() {
       // 重播
       M5.Mic.end();
       M5.Speaker.begin();
-      M5.Speaker.setVolume(220);
+      M5.Speaker.setVolume(255);
       M5.Speaker.playRaw(playPcm, playSamples, playRate, false, 1, 0);
       drawResult(true);
       while (M5.Speaker.isPlaying()) { M5.update(); M5.delay(20); }
