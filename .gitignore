@@ -1,0 +1,11 @@
+# 设备镜像与备份（含设备 NVS 中的 WiFi 凭据，绝不入库）
+backup/
+*.bin
+
+# Arduino 构建产物
+wifi_scanner/build/
+wifi_scanner/build-*/
+*/build/
+
+# macOS
+.DS_Store
