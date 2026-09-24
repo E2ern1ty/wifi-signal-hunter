@@ -4,10 +4,10 @@
  * 手持翻译器：按住 A 键说话，松开后 语音识别(ASR) → LLM 翻译 → TTS 合成，
  * 译文显示在屏幕上并用喇叭播放。B 键切换目标语言（英/日）。
  *
- * 云端链路（智谱开放平台，一把 API key 通吃）：
- *   POST /api/paas/v4/audio/asr          16kHz WAV → 文本 (glm-asr)
- *   POST /api/paas/v4/chat/completions   文本 → 译文 (glm-4-flash, 免费)
- *   POST /api/paas/v4/audio/speech       译文 → 语音 (cogtts, mp3/wav)
+ * 云端链路（硅基流动 SiliconFlow，一把 API key 通吃）：
+ *   POST /v1/audio/transcriptions  16kHz WAV → 文本 (SenseVoiceSmall, 免费)
+ *   POST /v1/chat/completions      文本 → 译文 (Qwen2.5-7B, 免费)
+ *   POST /v1/audio/speech          译文 → 语音 (CosyVoice2, WAV/chunked)
  *
  * 音频：ES8311 编解码器，M5.Mic 采集 / M5.Speaker 播放（二者互斥，用时切换）。
  * MP3 解码：ESP8266Audio(libhelix) 解到 PSRAM PCM 再 playRaw。
@@ -152,7 +152,8 @@ static String httpsPostWav(const char *path, const int16_t *pcm, size_t samples,
   u32 = dataLen; memcpy(hdr + 40, &u32, 4);
 
   String pre = String("--") + BOUNDARY + "\r\n"
-               "Content-Disposition: form-data; name=\"model\"\r\n\r\nglm-asr\r\n";
+               "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
+               "FunAudioLLM/SenseVoiceSmall\r\n";
   pre += String("--") + BOUNDARY + "\r\n";
   pre += "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n";
   pre += "Content-Type: audio/wav\r\n\r\n";
@@ -213,7 +214,7 @@ static bool httpsPostBinary(const char *path, const String &body,
     return false;
   }
   String contentType = "", transferEnc = "";
-  size_t contentLen = 0; bool hasLen = false;
+  size_t contentLen = 0; bool hasLen = false, chunked = false;
   while (client.connected()) {
     String h = client.readStringUntil('\n');
     h.trim();
@@ -222,23 +223,35 @@ static bool httpsPostBinary(const char *path, const String &body,
     if (h.startsWith("Transfer-Encoding:")) transferEnc = h.substring(18), transferEnc.trim();
     if (h.startsWith("Content-Length:")) { contentLen = h.substring(15).toInt(); hasLen = true; }
   }
-  if (transferEnc.indexOf("chunked") >= 0) {
-    Serial.println("[tts] chunked encoding not supported");
-    return false; // 走“仅显示文本”降级
-  }
-  Serial.printf("[tts] type=%s len=%d\r\n", contentType.c_str(), (int)contentLen);
+  chunked = transferEnc.indexOf("chunked") >= 0;
+  Serial.printf("[tts] type=%s len=%d chunked=%d\r\n", contentType.c_str(),
+                (int)contentLen, (int)chunked);
   size_t cap = hasLen ? contentLen : 2 * 1024 * 1024;
-  ttsAudio = (uint8_t *)ps_malloc(cap + 1);
+  ttsAudio = (uint8_t *)ps_malloc(cap + 64);
   if (!ttsAudio) return false;
   ttsLen = 0;
-  while (client.connected() && (ttsLen < cap) &&
-         (!hasLen || client.available() || ttsLen < contentLen)) {
-    if (client.available()) {
-      int c = client.read();
-      if (c < 0) break;
-      ttsAudio[ttsLen++] = (uint8_t)c;
-    } else if (!client.connected()) break;
-    else delay(1);
+  if (chunked) {
+    // 解 chunked：行 = 十六进制长度，随后是等长数据，0 表示结束
+    while (client.connected()) {
+      String szLine = client.readStringUntil('\n');
+      szLine.trim();
+      if (szLine.isEmpty()) continue;
+      size_t sz = strtol(szLine.c_str(), nullptr, 16);
+      if (sz == 0) break;
+      if (ttsLen + sz > cap) sz = cap - ttsLen; // 超容量截断
+      uint32_t t0 = millis();
+      while (sz && client.connected()) {
+        if (client.available()) { ttsAudio[ttsLen++] = (uint8_t)client.read(); sz--; }
+        else if (millis() - t0 > 15000) return false;
+        else delay(1);
+      }
+      if (client.connected() && client.available()) { client.read(); client.read(); } // \r\n
+    }
+  } else {
+    while (client.connected() && ttsLen < cap) {
+      if (client.available()) ttsAudio[ttsLen++] = (uint8_t)client.read();
+      else delay(1);
+    }
   }
   if (fileExt) {} // 预留
   return ttsLen > 44;
@@ -384,7 +397,7 @@ static bool doAsr() {
 
 static bool doTranslate() {
   JsonDocument req;
-  req["model"] = "glm-4-flash";
+  req["model"] = "Qwen/Qwen2.5-7B-Instruct";
   req["temperature"] = 0.1;
   req["max_tokens"] = 300;
   JsonArray msgs = req["messages"].to<JsonArray>();
@@ -414,13 +427,13 @@ static bool doTranslate() {
 
 static bool doTtsFetch() {
   JsonDocument req;
-  req["model"] = "cogtts";
+  req["model"] = "FunAudioLLM/CosyVoice2-0.5B";
   req["input"] = dstText;
-  req["voice"] = "tongtong";
-  req["response_format"] = "mp3";
+  req["voice"] = "FunAudioLLM/CosyVoice2-0.5B:alex";
+  req["response_format"] = "wav";
   String body;
   serializeJson(req, body);
-  if (!httpsPostBinary(TTS_PATH, body, "mp3")) { errMsg = "TTS failed"; return false; }
+  if (!httpsPostBinary(TTS_PATH, body, "wav")) { errMsg = "TTS failed"; return false; }
   return true;
 }
 
