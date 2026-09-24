@@ -5,7 +5,7 @@
  * 译文显示在屏幕上并用喇叭播放。B 键切换目标语言（英/日）。
  *
  * 云端链路（硅基流动 SiliconFlow，一把 API key 通吃）：
- *   POST /v1/audio/transcriptions  16kHz WAV → 文本 (SenseVoiceSmall, 免费)
+ *   POST /v1/audio/transcriptions  16kHz WAV → 文本 (Qwen3-ASR-1.7B, ~0.3s)
  *   POST /v1/chat/completions      文本 → 译文 (Qwen2.5-7B, 免费)
  *   POST /v1/audio/speech          译文 → 语音 (CosyVoice2, WAV/chunked)
  *
@@ -226,7 +226,7 @@ static String httpsPostWav(const char *path, const int16_t *pcm, size_t samples,
 
   String pre = String("--") + BOUNDARY + "\r\n"
                "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
-               "FunAudioLLM/SenseVoiceSmall\r\n";
+               "Qwen/Qwen3-ASR-1.7B\r\n";
   pre += String("--") + BOUNDARY + "\r\n";
   pre += "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n";
   pre += "Content-Type: audio/wav\r\n\r\n";
