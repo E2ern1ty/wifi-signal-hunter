@@ -9,3 +9,5 @@ wifi_scanner/build-*/
 
 # macOS
 .DS_Store
+# 翻译器密钥（绝不提交）
+translator/secrets.h
