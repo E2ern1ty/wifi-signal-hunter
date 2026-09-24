@@ -4,6 +4,10 @@
  * 手持翻译器：按住 A 键说话，松开后 语音识别(ASR) → LLM 翻译 → TTS 合成，
  * 译文显示在屏幕上并用喇叭播放。B 键切换目标语言（英/日）。
  *
+ * v2：讯飞 iat 流式听写（按住说话的同时音频推流、文字边说边出），
+ *     识别完成后硅基流动 Qwen 翻译 + CosyVoice 合成；iat 失败自动回退
+ *     到硅基流动 Qwen3-ASR 整段识别。
+ *
  * 云端链路（硅基流动 SiliconFlow，一把 API key 通吃）：
  *   POST /v1/audio/transcriptions  16kHz WAV → 文本 (Qwen3-ASR-1.7B, ~0.3s)
  *   POST /v1/chat/completions      文本 → 译文 (Qwen2.5-7B, 免费)
@@ -24,6 +28,10 @@
 #include <AudioFileSourcePROGMEM.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutput.h>
+#include <WebSocketsClient.h>
+#include <mbedtls/md.h>
+#include <mbedtls/base64.h>
+#include <time.h>
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -61,6 +69,146 @@ static uint32_t resultShownMs = 0;
 static uint8_t rotCur = 3, rotCandidate = 3;
 static unsigned long rotCandidateSince = 0;
 static constexpr float AX_SIGN = 1.0f;
+
+// ---------- 讯飞 iat 流式听写 ----------
+static WebSocketsClient xfWs;
+static bool iatConnected = false, iatDone = false, iatError = false;
+static String iatText;
+static volatile int16_t *iatDoneBuf = nullptr; // 完成块指针邮箱
+
+static String urlEnc(const char *s) {
+  String o;
+  for (const char *p = s; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o += (char)c;
+    else { char b[4]; snprintf(b, 4, "%%%02X", c); o += b; }
+  }
+  return o;
+}
+
+// iat WS 事件：解析识别增量
+static void xfWsEvent(WStype_t type, uint8_t *payload, size_t length) {
+  switch (type) {
+  case WStype_CONNECTED:
+    iatConnected = true;
+    Serial.println("[iat] ws connected");
+    break;
+  case WStype_DISCONNECTED:
+    iatConnected = false;
+    break;
+  case WStype_ERROR:
+    iatError = true;
+    Serial.println("[iat] ws error");
+    break;
+  case WStype_TEXT: {
+    JsonDocument doc;
+    if (deserializeJson(doc, payload, length)) break;
+    int code = doc["code"] | -1;
+    if (code != 0) {
+      iatError = true;
+      Serial.printf("[iat] code=%d %s\r\n", code,
+                    (const char *)(doc["message"] | ""));
+      break;
+    }
+    for (JsonObject ws_ : doc["data"]["result"]["ws"].as<JsonArray>())
+      for (JsonObject cw : ws_["cw"].as<JsonArray>())
+        iatText += String((const char *)(cw["w"] | ""));
+    if ((int)(doc["data"]["status"] | 0) == 2) iatDone = true;
+    break;
+  }
+  default: break;
+  }
+}
+
+// 构造带签名的 /v2/iat URL（需 NTP 已同步）
+static String iatBuildUrl() {
+  time_t now = time(nullptr);
+  struct tm tmv;
+  gmtime_r(&now, &tmv);
+  char date[40];
+  strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &tmv);
+  String origin = String("host: ") + "iat-api.xfyun.cn" + "\ndate: " + date +
+                  "\nGET /v2/iat HTTP/1.1";
+  unsigned char mac[32] = {0};
+  mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                  (const unsigned char *)XF_API_SECRET, strlen(XF_API_SECRET),
+                  (const unsigned char *)origin.c_str(), origin.length(), mac);
+  unsigned char b64[128] = {0};
+  size_t olen = 0;
+  mbedtls_base64_encode(b64, sizeof(b64), &olen, mac, 32);
+  String authOrigin = String("api_key=\"") + XF_API_KEY +
+                      "\", algorithm=\"hmac-sha256\", "
+                      "headers=\"host date request-line\", signature=\"" +
+                      (const char *)b64 + "\"";
+  unsigned char b64auth[256] = {0};
+  mbedtls_base64_encode(b64auth, sizeof(b64auth), &olen,
+                        (const unsigned char *)authOrigin.c_str(),
+                        authOrigin.length());
+  return String("/v2/iat?authorization=") + urlEnc((const char *)b64auth) +
+         "&date=" + urlEnc(date) + "&host=iat-api.xfyun.cn";
+}
+
+static bool iatStart() {
+  iatConnected = iatDone = iatError = false;
+  iatText = "";
+  xfWs.beginSSL("iat-api.xfyun.cn", 443, iatBuildUrl().c_str());
+  xfWs.onEvent(xfWsEvent);
+  xfWs.setReconnectInterval(10000);
+  uint32_t t0 = millis();
+  while (!iatConnected && !iatError && millis() - t0 < 4000) {
+    xfWs.loop();
+    delay(5);
+  }
+  if (!iatConnected) return false;
+  // 首帧业务参数
+  JsonDocument doc;
+  doc["common"]["app_id"] = XF_APPID;
+  doc["business"]["language"] = "zh_cn";
+  doc["business"]["domain"] = "iat";
+  doc["business"]["accent"] = "mandarin";
+  doc["data"]["status"] = 0;
+  doc["data"]["format"] = "audio/L16;rate=16000";
+  doc["data"]["encoding"] = "raw";
+  doc["data"]["audio"] = "";
+  String s;
+  serializeJson(doc, s);
+  xfWs.sendTXT(s);
+  return true;
+}
+
+static void iatSendAudio(const int16_t *pcm, size_t samples, bool last) {
+  if (!iatConnected || iatError) return;
+  unsigned char b64[4096];
+  size_t olen = 0;
+  mbedtls_base64_encode(b64, sizeof(b64), &olen,
+                        (const unsigned char *)pcm, samples * 2);
+  JsonDocument doc;
+  JsonObject d = doc["data"].to<JsonObject>();
+  d["status"] = last ? 2 : 1;
+  d["format"] = "audio/L16;rate=16000";
+  d["encoding"] = "raw";
+  d["audio"] = (const char *)b64;
+  String s;
+  serializeJson(doc, s);
+  xfWs.sendTXT(s);
+}
+
+// 结束帧后收尾（最多等 waitMs）
+static bool iatFinish(uint32_t waitMs) {
+  JsonDocument doc;
+  doc["data"]["status"] = 2;
+  String s;
+  serializeJson(doc, s);
+  xfWs.sendTXT(s);
+  uint32_t t0 = millis();
+  while (!iatDone && !iatError && millis() - t0 < waitMs) {
+    xfWs.loop();
+    delay(5);
+  }
+  xfWs.disconnect();
+  Serial.printf("[iat] done=%d text='%s'\r\n", (int)iatDone, iatText.c_str());
+  return iatDone && iatText.length() > 0;
+}
 
 // ---------- 小工具 ----------
 static const char *langCode(Lang l) { return l == LANG_EN ? "English" : "Japanese"; }
@@ -467,6 +615,7 @@ static bool parseWav(const uint8_t *wav, size_t len, const int16_t **pcmOut,
 }
 
 // ---------- 录音 ----------
+static volatile bool iatActiveFlag = false; // 录音是否同时走 iat 推流
 static void recReleased(void *, void *data, size_t samples) {
   // 麦克风任务回调：把完成块追加进 PSRAM
   if (!recPcm) return;
@@ -474,6 +623,7 @@ static void recReleased(void *, void *data, size_t samples) {
   size_t n = min(room, samples);
   if (n) memcpy(recPcm + recSamples, data, n * sizeof(int16_t));
   recSamples += n;
+  if (iatActiveFlag) iatDoneBuf = (int16_t *)data;
 }
 
 static float chunkLevel(const int16_t *s, size_t n) {
@@ -482,11 +632,35 @@ static float chunkLevel(const int16_t *s, size_t n) {
   return min(1.0f, peak / 12000.0f);
 }
 
-static void doRecord() {
+static void drawRecScreen() {
   M5.Lcd.fillScreen(TFT_BLACK);
+  M5.Lcd.fillCircle(14, 12, 6, TFT_RED);
+  M5.Lcd.setTextFont(2);
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Lcd.setCursor(30, 5);
+  M5.Lcd.printf("%.1fs", (millis() - recStartMs) / 1000.0f);
+  M5.Lcd.setTextColor(iatActiveFlag ? TFT_CYAN : TFT_DARKGREY, TFT_BLACK);
+  M5.Lcd.setCursor(150, 5);
+  M5.Lcd.print(iatActiveFlag ? "streaming" : "recording");
+  int bw = (int)(220 * recLevel);
+  M5.Lcd.fillRect(10, 26, 220, 10, TFT_DARKGREY);
+  M5.Lcd.fillRect(10, 26, bw, 10, recLevel > 0.7f ? TFT_RED : TFT_GREEN);
+  // 边说边出的实时识别文字
+  M5.Lcd.setFont(&fonts::efontCN_12);
+  drawWrapped(iatText.c_str(), 10, 44, 220, 5, TFT_WHITE, 16);
+  M5.Lcd.setTextFont(1);
+  M5.Lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  M5.Lcd.setCursor(4, 126);
+  M5.Lcd.print("listening ...");
+}
+
+static void doRecord() {
   recSamples = 0;
   recLevel = 0;
   recStartMs = millis();
+  iatDoneBuf = nullptr;
+  // 先起 iat WS（握手约 1s），成功则边录边推流
+  iatActiveFlag = iatStart();
   M5.Speaker.end();          // mic/speaker 互斥
   M5.Mic.setBufferReleaseCallback(nullptr, recReleased);
   M5.Mic.begin();
@@ -495,33 +669,27 @@ static void doRecord() {
     M5.update();
     bool held = M5.BtnA.isPressed() && (millis() - recStartMs < MAX_SAMPLES * 1000ULL / SAMPLE_RATE - 500);
     if (!held) break;
-    M5.Mic.record(chunkBuf, CHUNK, SAMPLE_RATE); // 阻塞节拍
+    M5.Mic.record(chunkBuf, CHUNK, SAMPLE_RATE); // 阻塞节拍（两槽满则等待）
     recLevel = 0.6f * recLevel + 0.4f * chunkLevel(chunkBuf, CHUNK);
-    if (millis() - lastUi > 100) {
+    // 推流刚完成的块 + 收识别增量
+    xfWs.loop();
+    int16_t *done = (int16_t *)iatDoneBuf;
+    if (done) { iatDoneBuf = nullptr; iatSendAudio(done, CHUNK, false); }
+    if (millis() - lastUi > 250) {
       lastUi = millis();
-      M5.Lcd.fillScreen(TFT_BLACK);
-      M5.Lcd.fillCircle(14, 12, 6, TFT_RED);
-      M5.Lcd.setTextFont(2);
-      M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-      M5.Lcd.setCursor(30, 5);
-      M5.Lcd.printf("%.1fs", (millis() - recStartMs) / 1000.0f);
-      M5.Lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-      M5.Lcd.setCursor(150, 5);
-      M5.Lcd.print("release=send");
-      int bw = (int)(220 * recLevel);
-      M5.Lcd.fillRect(10, 50, 220, 24, TFT_DARKGREY);
-      M5.Lcd.fillRect(10, 50, bw, 24, recLevel > 0.7f ? TFT_RED : TFT_GREEN);
-      M5.Lcd.setTextFont(1);
-      M5.Lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-      M5.Lcd.setCursor(10, 100);
-      M5.Lcd.print("listening ...");
+      drawRecScreen();
     }
-    delay(1);
   }
-  while (M5.Mic.isRecording()) M5.delay(1);
+  // 冲刷队列里残留的块
+  while (M5.Mic.isRecording()) {
+    xfWs.loop();
+    int16_t *done = (int16_t *)iatDoneBuf;
+    if (done) { iatDoneBuf = nullptr; iatSendAudio(done, CHUNK, false); }
+    M5.delay(1);
+  }
   M5.Mic.end();
-  Serial.printf("[rec] %d samples (%.1fs)\r\n", (int)recSamples,
-                recSamples / (float)SAMPLE_RATE);
+  Serial.printf("[rec] %d samples (%.1fs) iat=%d\r\n", (int)recSamples,
+                recSamples / (float)SAMPLE_RATE, (int)iatActiveFlag);
 }
 
 // ---------- 三步流水线 ----------
@@ -788,6 +956,11 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   Serial.printf("[wifi] %s ip=%s\r\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+  // NTP（iat 鉴权要求 UTC 时间，±300s 容差）
+  configTime(0, 0, "ntp1.aliyun.com", "ntp2.aliyun.com", "pool.ntp.org");
+  struct tm tnow;
+  bool ntpOk = getLocalTime(&tnow, 8000);
+  Serial.printf("[ntp] %s\r\n", ntpOk ? "ok" : "FAIL(iat将回退HTTPS识别)");
   Serial.printf("[wifi] diag: %s\r\n", netDiag("boot").c_str());
   setState(ST_IDLE);
   drawIdle();
@@ -841,9 +1014,20 @@ void loop() {
       if (recSamples < MIN_SAMPLES) {
         Serial.println("[rec] too short, ignore");
         setState(ST_IDLE); drawIdle();
-      } else {
-        setState(ST_ASR);
+        break;
       }
+      // iat 流式识别收尾（松手即出全文）；失败则回退整段 HTTPS 识别
+      if (iatActiveFlag) {
+        drawBusy("识别收尾中");
+        if (iatFinish(5000)) {
+          srcText = iatText;
+          Serial.printf("[iat] '%s'\r\\n", srcText.c_str());
+          setState(ST_LLM);
+          break;
+        }
+        Serial.println("[iat] failed, fallback to HTTPS ASR");
+      }
+      setState(ST_ASR);
     }
     break;
 
