@@ -177,37 +177,106 @@ static bool splitResponse(const String &raw, int *code, String *body) {
   return true;
 }
 
-// ---------- HTTP 基础 ----------
-// 发 JSON POST，返回响应体（文本，JSON 或错误信息）；失败返回空串
-static String httpsPostJson(const char *path, const String &body,
-                            int *httpCode) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(20000);
-  if (!client.connect(API_HOST, 443)) return "";
-  client.printf("POST %s HTTP/1.1\r\n"
-                "Host: %s\r\n"
-                "User-Agent: M5StickS3-Translator/1.0\r\n"
-                "Authorization: Bearer %s\r\n"
-                "Content-Type: application/json\r\n"
-                "Content-Length: %d\r\n"
-                "Connection: close\r\n\r\n",
-                path, API_HOST, API_KEY, (int)body.length());
-  client.print(body);
-  if (!waitResponse(client, 25000, "LLM")) return "";
-  String raw = readAll(client, 10000);
-  int code2 = 0; String body2;
-  if (!splitResponse(raw, &code2, &body2)) { errMsg = "LLM hdr? " + raw.substring(0, 60); return ""; }
-  *httpCode = code2;
-  return body2;
+// ---------- HTTP 基础（keep-alive 长连接：三个请求只握一次 TLS 手） ----------
+static WiFiClientSecure https;
+
+static bool ensureHttps() {
+  if (https.connected()) return true;
+  https.stop();
+  https.setInsecure();
+  https.setTimeout(20);
+  if (https.connect(API_HOST, 443)) return true;
+  errMsg = netDiag("TCP");
+  return false;
 }
 
-// multipart 上传 WAV 做 ASR，返回 JSON 响应体
-static String httpsPostWav(const char *path, const int16_t *pcm, size_t samples,
-                           int *httpCode) {
-  // 构造 WAV 头（44 字节，字段偏移见 WAV 规范；fmt 魔数在 12-15！）
-  size_t dataLen = samples * 2;
-  uint8_t hdr[44];
+// 响应元信息（readResponseHead 填充）
+static int g_code = 0;
+static size_t g_contentLen = 0;
+static bool g_hasLen = false, g_chunked = false;
+
+// 读状态行+响应头。成功时 body 的读取方式由 g_hasLen/g_chunked 决定
+static bool readResponseHead(const char *tag) {
+  if (!waitResponse(https, 25000, tag)) return false;
+  String statusLine = readLine(https, 5000);
+  if (!statusLine.startsWith("HTTP/")) return false;
+  g_code = statusLine.substring(9, 12).toInt();
+  g_hasLen = g_chunked = false;
+  g_contentLen = 0;
+  while (true) {
+    String h = readLine(https, 5000);
+    h.trim();
+    if (h.length() == 0) break;
+    if (h.startsWith("Content-Length:")) {
+      g_contentLen = h.substring(15).toInt();
+      g_hasLen = true;
+    }
+    if (h.startsWith("Transfer-Encoding:")) g_chunked = h.indexOf("chunked") >= 0;
+  }
+  Serial.printf("[%s] HTTP %d len=%d chunked=%d\r\n", tag, g_code,
+                (int)g_contentLen, (int)g_chunked);
+  return true;
+}
+
+// 按长度读文本 body（keep-alive 下不能靠断连判断结束）
+static String readBodyText(size_t n) {
+  String out;
+  uint32_t lastData = millis();
+  while (out.length() < n && millis() - lastData < 10000) {
+    if (https.available()) {
+      out += (char)https.read();
+      lastData = millis();
+    } else if (!https.connected()) {
+      break;
+    } else {
+      delay(1);
+    }
+  }
+  return out;
+}
+
+static void requestHeaders(const char *path, const char *contentType,
+                           size_t contentLen) {
+  https.printf("POST %s HTTP/1.1\r\n"
+               "Host: %s\r\n"
+               "User-Agent: M5StickS3-Translator/1.0\r\n"
+               "Authorization: Bearer %s\r\n"
+               "Content-Type: %s\r\n"
+               "Content-Length: %d\r\n"
+               "Connection: keep-alive\r\n\r\n",
+               path, API_HOST, API_KEY, contentType, (int)contentLen);
+}
+
+// 发 JSON POST，返回响应体；失败返回空串（两个文本接口共用）
+static String httpsPostJson(const char *path, const String &body,
+                            int *httpCode) {
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (!ensureHttps()) return "";
+    requestHeaders(path, "application/json", body.length());
+    https.print(body);
+    if (!readResponseHead("LLM")) { https.stop(); continue; }
+    if (!g_hasLen && !g_chunked) { https.stop(); continue; }
+    *httpCode = g_code;
+    if (g_chunked) { // 文本响应按 chunked 读（理论上不会走到）
+      String out;
+      while (true) {
+        String szLine = readLine(https, 5000);
+        szLine.trim();
+        size_t sz = strtol(szLine.c_str(), nullptr, 16);
+        if (sz == 0) break;
+        out += readBodyText(sz);
+        readLine(https, 2000); // 尾部 \r\n
+      }
+      return out;
+    }
+    return readBodyText(g_contentLen);
+  }
+  errMsg = errMsg.isEmpty() ? "LLM: conn" : errMsg;
+  return "";
+}
+
+// 构造 44 字节 WAV 头（字段偏移见 WAV 规范；fmt 魔数在 12-15！）
+static void buildWavHeader(uint8_t *hdr, size_t dataLen) {
   uint32_t u32;
   uint16_t u16;
   memcpy(hdr + 0, "RIFF", 4);
@@ -223,7 +292,14 @@ static String httpsPostWav(const char *path, const int16_t *pcm, size_t samples,
   u16 = 16; memcpy(hdr + 34, &u16, 2);               // bits
   memcpy(hdr + 36, "data", 4);
   u32 = dataLen; memcpy(hdr + 40, &u32, 4);
+}
 
+// multipart 上传 WAV 做 ASR，返回 JSON 响应体
+static String httpsPostWav(const char *path, const int16_t *pcm, size_t samples,
+                           int *httpCode) {
+  size_t dataLen = samples * 2;
+  uint8_t hdr[44];
+  buildWavHeader(hdr, dataLen);
   String pre = String("--") + BOUNDARY + "\r\n"
                "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
                "Qwen/Qwen3-ASR-1.7B\r\n";
@@ -232,129 +308,98 @@ static String httpsPostWav(const char *path, const int16_t *pcm, size_t samples,
   pre += "Content-Type: audio/wav\r\n\r\n";
   String post = String("\r\n--") + BOUNDARY + "--\r\n";
   size_t total = pre.length() + sizeof(hdr) + dataLen + post.length();
+  String ct = String("multipart/form-data; boundary=") + BOUNDARY;
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(20);
-  bool ok = client.connect(API_HOST, 443);
-  if (!ok) { // 重试一次，排除瞬态
-    delay(1000);
-    ok = client.connect(API_HOST, 443);
-  }
-  if (!ok) {
-    errMsg = netDiag("ASR-TCP");
-    Serial.println(errMsg);
-    return "";
-  }
-  client.printf("POST %s HTTP/1.1\r\n"
-                "Host: %s\r\n"
-                "User-Agent: M5StickS3-Translator/1.0\r\n"
-                "Authorization: Bearer %s\r\n"
-                "Content-Type: multipart/form-data; boundary=%s\r\n"
-                "Content-Length: %d\r\n"
-                "Connection: close\r\n\r\n",
-                path, API_HOST, API_KEY, BOUNDARY, (int)total);
-  client.print(pre);
-  client.write(hdr, sizeof(hdr));
-  const uint8_t *p = (const uint8_t *)pcm;
-  size_t sent = 0;
-  while (sent < dataLen) {
-    size_t n = min((size_t)4096, dataLen - sent);
-    size_t off = 0;
-    int stall = 0;
-    while (off < n) { // 部分写入是正常现象，必须循环补写
-      size_t w = client.write(p + sent + off, n - off);
-      if (w == 0) {
-        if (++stall > 2000) { // ~2 秒无进展判定断流
-          errMsg = netDiag("ASR-WR") + String(" @") + String(sent + off);
-          Serial.println(errMsg);
-          return "";
-        }
-        delay(1);
-      } else {
-        stall = 0;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (!ensureHttps()) return "";
+    requestHeaders(path, ct.c_str(), total);
+    https.print(pre);
+    https.write(hdr, sizeof(hdr));
+    const uint8_t *p = (const uint8_t *)pcm;
+    size_t sent = 0;
+    bool broken = false;
+    while (sent < dataLen) {
+      size_t n = min((size_t)4096, dataLen - sent);
+      size_t off = 0;
+      int stall = 0;
+      while (off < n) { // 部分写入是正常现象，必须循环补写
+        size_t w = https.write(p + sent + off, n - off);
+        if (w == 0) {
+          if (++stall > 2000) { broken = true; break; }
+          delay(1);
+        } else stall = 0;
+        off += w;
       }
-      off += w;
+      if (broken) break;
+      sent += n;
     }
-    sent += n;
+    if (broken) { https.stop(); continue; }
+    https.print(post);
+    if (!readResponseHead("ASR")) { https.stop(); continue; }
+    if (!g_hasLen && !g_chunked) { https.stop(); continue; }
+    *httpCode = g_code;
+    if (g_chunked) {
+      String out;
+      while (true) {
+        String szLine = readLine(https, 5000);
+        szLine.trim();
+        size_t sz = strtol(szLine.c_str(), nullptr, 16);
+        if (sz == 0) break;
+        out += readBodyText(sz);
+        readLine(https, 2000);
+      }
+      return out;
+    }
+    if (g_contentLen == 0) return String(""); // 空体（如 5xx）
+    return readBodyText(g_contentLen);
   }
-  client.print(post);
-
-  if (!waitResponse(client, 25000, "ASR")) return "";
-  String raw = readAll(client, 10000);
-  int code2 = 0; String body2;
-  if (!splitResponse(raw, &code2, &body2)) { errMsg = "ASR hdr? " + raw.substring(0, 60); return ""; }
-  if (body2.isEmpty()) { errMsg = "ASR HTTP " + String(code2) + " empty-body"; return ""; }
-  *httpCode = code2;
-  return body2;
+  if (errMsg.isEmpty()) errMsg = "ASR: conn";
+  return "";
 }
 
-// TTS：POST JSON，响应是二进制音频，存入 out(ps_malloc)
+// TTS：POST JSON，响应是二进制音频，存入 ttsAudio(ps_malloc)
 static bool httpsPostBinary(const char *path, const String &body,
                             const char *fileExt) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(20);
-  if (!client.connect(API_HOST, 443)) { errMsg = netDiag("TTS-TCP"); return false; }
-  client.printf("POST %s HTTP/1.1\r\n"
-                "Host: %s\r\n"
-                "User-Agent: M5StickS3-Translator/1.0\r\n"
-                "Authorization: Bearer %s\r\n"
-                "Content-Type: application/json\r\n"
-                "Content-Length: %d\r\n"
-                "Connection: close\r\n\r\n",
-                path, API_HOST, API_KEY, (int)body.length());
-  client.print(body);
-  if (!waitResponse(client, 30000, "TTS")) return false;
-  String statusLine = readLine(client, 5000);
-  if (!statusLine.startsWith("HTTP/") || statusLine.substring(9, 12).toInt() != 200) {
-    Serial.printf("[tts] bad status: %s\r\n", statusLine.c_str());
-    errMsg = "TTS st? " + statusLine.substring(0, 20);
-    return false;
-  }
-  String contentType = "", transferEnc = "";
-  size_t contentLen = 0; bool hasLen = false, chunked = false;
-  while (client.connected()) {
-    String h = readLine(client, 5000);
-    h.trim();
-    if (h.length() == 0) break;
-    if (h.startsWith("Content-Type:")) contentType = h.substring(13), contentType.trim();
-    if (h.startsWith("Transfer-Encoding:")) transferEnc = h.substring(18), transferEnc.trim();
-    if (h.startsWith("Content-Length:")) { contentLen = h.substring(15).toInt(); hasLen = true; }
-  }
-  chunked = transferEnc.indexOf("chunked") >= 0;
-  Serial.printf("[tts] type=%s len=%d chunked=%d\r\n", contentType.c_str(),
-                (int)contentLen, (int)chunked);
-  size_t cap = hasLen ? contentLen : 2 * 1024 * 1024;
-  ttsAudio = (uint8_t *)ps_malloc(cap + 64);
-  if (!ttsAudio) return false;
-  ttsLen = 0;
-  if (chunked) {
-    // 解 chunked：行 = 十六进制长度，随后是等长数据，0 表示结束
-    while (client.connected()) {
-      String szLine = readLine(client, 5000);
-      szLine.trim();
-      if (szLine.isEmpty()) continue;
-      size_t sz = strtol(szLine.c_str(), nullptr, 16);
-      if (sz == 0) break;
-      if (ttsLen + sz > cap) sz = cap - ttsLen; // 超容量截断
+  (void)fileExt;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (!ensureHttps()) return false;
+    requestHeaders(path, "application/json", body.length());
+    https.print(body);
+    if (!readResponseHead("TTS")) { https.stop(); continue; }
+    if (g_code != 200) { errMsg = "TTS HTTP " + String(g_code); return false; }
+    size_t cap = g_hasLen ? g_contentLen : 2 * 1024 * 1024;
+    ttsAudio = (uint8_t *)ps_malloc(cap + 64);
+    if (!ttsAudio) return false;
+    ttsLen = 0;
+    if (g_chunked) {
+      // 解 chunked：行 = 十六进制长度，随后是等长数据，0 表示结束
+      while (true) {
+        String szLine = readLine(https, 5000);
+        szLine.trim();
+        if (szLine.isEmpty()) continue;
+        size_t sz = strtol(szLine.c_str(), nullptr, 16);
+        if (sz == 0) break;
+        if (ttsLen + sz > cap) sz = cap - ttsLen;
+        uint32_t t0 = millis();
+        while (sz) {
+          if (https.available()) { ttsAudio[ttsLen++] = (uint8_t)https.read(); sz--; }
+          else if (!https.connected() || millis() - t0 > 15000) break;
+          else delay(1);
+        }
+      }
+    } else {
       uint32_t t0 = millis();
-      while (sz && client.connected()) {
-        if (client.available()) { ttsAudio[ttsLen++] = (uint8_t)client.read(); sz--; }
-        else if (millis() - t0 > 15000) return false;
+      while (ttsLen < cap) {
+        if (https.available()) { ttsAudio[ttsLen++] = (uint8_t)https.read(); }
+        else if (!https.connected() || millis() - t0 > 15000) break;
         else delay(1);
       }
-      if (client.connected() && client.available()) { client.read(); client.read(); } // \r\n
     }
-  } else {
-    while (client.connected() && ttsLen < cap) {
-      if (client.available()) ttsAudio[ttsLen++] = (uint8_t)client.read();
-      else delay(1);
-    }
+    return ttsLen > 44;
   }
-  if (fileExt) {} // 预留
-  return ttsLen > 44;
+  return false;
 }
+
 
 // ---------- MP3 解码到 PSRAM ----------
 class MemSink : public AudioOutput {
@@ -819,7 +864,12 @@ void loop() {
   }
 
   case ST_TTS: {
-    drawBusy("合成语音中");
+    // 先把译文亮出来再去合成语音——体感快 1~2 秒
+    drawResult(false);
+    M5.Lcd.setTextFont(1);
+    M5.Lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+    M5.Lcd.setCursor(4, 124);
+    M5.Lcd.print("speaking soon ...");
     bool ok = doTtsFetch() && preparePlayback();
     if (!ok) {
       // TTS 失败不致命：仍显示译文
